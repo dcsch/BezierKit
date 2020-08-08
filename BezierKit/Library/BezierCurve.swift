@@ -56,17 +56,11 @@ extension Subcurve: Equatable where CurveType: Equatable {
 
 extension BezierCurve {
 
-    /// a curve is considered linear if its control points are all a small distance from its baseline
-    private var linear: Bool {
-        let a = Utils.align(points, p1: self.startingPoint, p2: self.endingPoint)
-        return a.allSatisfy { abs($0.y) <= CGFloat(Utils.epsilon) }
-    }
-
     /*
      Calculates the length of this Bezier curve. Length is calculated using numerical approximation, specifically the Legendre-Gauss quadrature algorithm.
      */
     public func length() -> CGFloat {
-        return Utils.length({(_ t: CGFloat) in self.derivative(t)})
+        return Utils.length({(_ t: CGFloat) in self.derivative(at: t)})
     }
 
     public func extrema() -> (x: [CGFloat], y: [CGFloat], all: [CGFloat]) {
@@ -99,7 +93,7 @@ extension BezierCurve {
         assert(steps >= 0)
         return (0 ... steps).map {
             let t = CGFloat($0) / CGFloat(steps)
-            return self.compute(t)
+            return self.point(at: t)
         }
     }
     // MARK: -
@@ -131,13 +125,11 @@ extension BezierCurve {
         extrema.append(1.0)
 
         // first pass: split on extrema
-        var pass1: [Subcurve<Self>] = []
-        pass1.reserveCapacity(extrema.count-1)
-        for i in 0..<extrema.count-1 {
-            let t1 = extrema[i]
-            let t2 = extrema[i+1]
+        let pass1: [Subcurve<Self>] = (0..<extrema.count-1).map {
+            let t1 = extrema[$0]
+            let t2 = extrema[$0+1]
             let curve = self.split(from: t1, to: t2)
-            pass1.append(Subcurve(t1: t1, t2: t2, curve: curve))
+            return Subcurve(t1: t1, t2: t2, curve: curve)
         }
 
         func bisectionMethod(min: CGFloat, max: CGFloat, tolerance: CGFloat, callback: (_ value: CGFloat) -> Bool) -> CGFloat {
@@ -184,12 +176,17 @@ extension BezierCurve {
 
     /// Scales a curve with respect to the intersection between the end point normals. Note that this will only work if that intersection point exists, which is only guaranteed for simple segments.
     /// - Parameter distance: desired distance the resulting curve should fall from the original (in the direction of its normals).
-    public func scale(distance: CGFloat) -> Self {
+    public func scale(distance: CGFloat) -> Self? {
         let order = self.order
         assert(order < 4, "only works with cubic or lower order")
         guard order > 0 else { return self } // points cannot be scaled
         let points = self.points
-        let origin = Utils.linesIntersection(self.startingPoint, self.startingPoint + self.normal(0), self.endingPoint, self.endingPoint - self.normal(1))
+
+        let n1 = self.normal(at: 0)
+        let n2 = self.normal(at: 1)
+        guard n1.x.isFinite, n1.y.isFinite, n2.x.isFinite, n2.y.isFinite else { return nil }
+
+        let origin = Utils.linesIntersection(self.startingPoint, self.startingPoint + n1, self.endingPoint, self.endingPoint - n2)
         func scaledPoint(index: Int) -> CGPoint {
             let referencePointIsStart = (index < 2 && order > 1) || (index == 0 && order == 1)
             let referenceT: CGFloat = referencePointIsStart ? 0.0 : 1.0
@@ -199,7 +196,7 @@ extension BezierCurve {
             case 0, self.order:
                 return referencePoint
             default:
-                let tangent = self.normal(referenceT).perpendicular
+                let tangent = self.normal(at: referenceT).perpendicular
                 if let origin = origin, let intersection = Utils.linesIntersection(referencePoint, referencePoint + tangent, origin, points[index]) {
                     return intersection
                 } else {
@@ -215,24 +212,14 @@ extension BezierCurve {
     // MARK: -
 
     public func offset(distance d: CGFloat) -> [BezierCurve] {
-        if self.linear {
-            let n = self.normal(0)
-            return [Self.init(points: self.points.map { $0 + d * n })]
-        }
         // for non-linear curves we need to create a set of curves
-        var result: [BezierCurve] = self.reduce().map { $0.curve.scale(distance: d) }
+        var result: [BezierCurve] = self.reduce().compactMap { $0.curve.scale(distance: d) }
         ensureContinuous(&result)
         return result
     }
 
     public func offset(t: CGFloat, distance: CGFloat) -> CGPoint {
-        return self.compute(t) + distance * self.normal(t)
-    }
-
-    // MARK: - intersection
-
-    public func project(_ point: CGPoint) -> (point: CGPoint, t: CGFloat) {
-        return self.project(point, accuracy: BezierKit.defaultIntersectionAccuracy)
+        return self.point(at: t) + distance * self.normal(at: t)
     }
 
     // MARK: - outlines
@@ -259,8 +246,8 @@ extension BezierCurve {
     private func internalOutline(d1: CGFloat, d2: CGFloat) -> PathComponent {
         let reduced = self.reduce()
         let length = reduced.count
-        var forwardCurves: [BezierCurve] = reduced.map { $0.curve.scale(distance: d1) }
-        var backCurves: [BezierCurve] = reduced.map { $0.curve.scale(distance: -d2) }
+        var forwardCurves: [BezierCurve] = reduced.compactMap { $0.curve.scale(distance: d1) }
+        var backCurves: [BezierCurve] = reduced.compactMap { $0.curve.scale(distance: -d2) }
         ensureContinuous(&forwardCurves)
         ensureContinuous(&backCurves)
         // reverse the "return" outline
@@ -285,7 +272,7 @@ extension BezierCurve {
     public func outlineShapes(distanceAlongNormal d1: CGFloat, distanceOppositeNormal d2: CGFloat, accuracy: CGFloat = BezierKit.defaultIntersectionAccuracy) -> [Shape] {
         let outline = self.outline(distanceAlongNormal: d1, distanceOppositeNormal: d2)
         var shapes: [Shape] = []
-        let len = outline.elementCount
+        let len = outline.numberOfElements
         for i in 1..<len/2 {
             let shape = Shape(outline.element(at: i), outline.element(at: len-i), i > 1, i < len/2-1)
             shapes.append(shape)
@@ -320,15 +307,15 @@ public protocol BezierCurve: BoundingBoxProtocol, Transformable, Reversible {
     var endingPoint: CGPoint { get set }
     var order: Int { get }
     init(points: [CGPoint])
-    func derivative(_ t: CGFloat) -> CGPoint
-    func normal(_ t: CGFloat) -> CGPoint
+    func derivative(at t: CGFloat) -> CGPoint
+    func normal(at t: CGFloat) -> CGPoint
     func split(from t1: CGFloat, to t2: CGFloat) -> Self
     func split(at t: CGFloat) -> (left: Self, right: Self)
-    func compute(_ t: CGFloat) -> CGPoint
+    func point(at t: CGFloat) -> CGPoint
     func length() -> CGFloat
     func extrema() -> (x: [CGFloat], y: [CGFloat], all: [CGFloat])
     func lookupTable(steps: Int) -> [CGPoint]
-    func project(_ point: CGPoint, accuracy: CGFloat) -> (point: CGPoint, t: CGFloat)
+    func project(_ point: CGPoint) -> (point: CGPoint, t: CGFloat)
     // intersection routines
     func selfIntersects(accuracy: CGFloat) -> Bool
     func selfIntersections(accuracy: CGFloat) -> [Intersection]
@@ -351,74 +338,5 @@ public protocol Flatness: BezierCurve {
 public extension Flatness {
     var flatness: CGFloat {
         return sqrt(flatnessSquared)
-    }
-}
-
-extension Flatness {
-    public func project(_ point: CGPoint, accuracy: CGFloat) -> (point: CGPoint, t: CGFloat) {
-
-        let maxIterations = 1000
-
-        var list: [Subcurve<Self>] = [Subcurve(curve: self)]
-
-        let distanceStartingPoint = distance(self.startingPoint, point)
-        var bestMax = distanceStartingPoint
-        var bestPoint = self.startingPoint
-        var bestT: CGFloat = 0.0
-
-        let distanceEndingPoint = distance(self.endingPoint, point)
-        if distanceEndingPoint < bestMax {
-            bestMax = distanceEndingPoint
-            bestPoint = self.endingPoint
-            bestT = 1.0
-        }
-
-        func needCheckSubcurve(_ subcurve: Subcurve<Self>) -> Bool {
-            let line = LineSegment(p0: subcurve.curve.startingPoint, p1: subcurve.curve.endingPoint)
-            let f = subcurve.curve.flatness
-            guard 0.5 * line.length() + f > accuracy else {
-                return false
-            }
-            var lowerBoundOfDistance = distance(point, line.project(point).point) - f
-            if lowerBoundOfDistance < 0 { lowerBoundOfDistance = 0 }
-            return lowerBoundOfDistance < bestMax
-        }
-
-        var iterations = 0
-        while !list.isEmpty, iterations < maxIterations {
-            var nextList: [Subcurve<Self>] = []
-            nextList.reserveCapacity(10)
-            // for each item in our list, check the midpoint
-            // to try and find a new best
-            list.forEach {
-                let sampleT: CGFloat = 0.5
-                let curvePoint = $0.curve.compute(sampleT)
-                let mmax = distance(point, curvePoint)
-                if mmax < bestMax {
-                    bestMax = mmax
-                    bestPoint = curvePoint
-                    bestT = (1.0 - sampleT) * $0.t1 + sampleT * $0.t2
-                }
-            }
-            iterations += list.count
-            // for each item in our list, if the curve
-            // is large enough to be split, do so.
-            // add the subcurves to the next list if they are large
-            // enough to exceed our error threshold and they are close enough
-            // to possibly have a solution
-            list.forEach {
-                if $0.canSplit, needCheckSubcurve($0) {
-                    let (left, right) = $0.split(at: 0.5)
-                    if needCheckSubcurve(left) {
-                        nextList.append(left)
-                    }
-                    if needCheckSubcurve(right) {
-                        nextList.append(right)
-                    }
-                }
-            }
-            list = nextList
-        }
-        return (point: bestPoint, t: bestT)
     }
 }

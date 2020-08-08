@@ -6,11 +6,7 @@
 //  Copyright © 2016 Holmes Futrell. All rights reserved.
 //
 
-import Foundation
-
-#if os(iOS)
-    import CoreGraphics
-#endif
+import CoreGraphics
 
 public struct Intersection: Equatable, Comparable {
     public var t1: CGFloat
@@ -90,13 +86,7 @@ public struct BoundingBox: Equatable {
     public func overlaps(_ other: BoundingBox) -> Bool {
         let p1 = CGPoint.max(self.min, other.min)
         let p2 = CGPoint.min(self.max, other.max)
-        for i in 0..<CGPoint.dimensions {
-            let difference = p2[i] - p1[i]
-            if difference.isNaN || difference < 0 {
-                return false
-            }
-        }
-        return true
+        return p2.x >= p1.x && p2.y >= p1.y
     }
     internal func lowerBoundOfDistance(to point: CGPoint) -> CGFloat {
         let distanceSquared = (0..<CGPoint.dimensions).reduce(CGFloat(0.0)) {

@@ -59,7 +59,7 @@ internal func windingCountImpliesContainment(_ count: Int, using rule: PathFillR
     private lazy var _cgPath: CGPath = {
         let mutablePath = CGMutablePath()
         self.components.forEach {
-            mutablePath.addPath($0.cgPath)
+            $0.appendPath(to: mutablePath)
         }
         return mutablePath.copy()!
     }()
@@ -80,9 +80,9 @@ internal func windingCountImpliesContainment(_ count: Int, using rule: PathFillR
 
     @objc public let components: [PathComponent]
 
-    @objc(point:isWithinDistanceOfBoundary:accuracy:) public func pointIsWithinDistanceOfBoundary(point p: CGPoint, distance d: CGFloat, accuracy: CGFloat = BezierKit.defaultIntersectionAccuracy) -> Bool {
+    @objc(point:isWithinDistanceOfBoundary:) public func pointIsWithinDistanceOfBoundary(point p: CGPoint, distance d: CGFloat) -> Bool {
         return self.components.contains {
-            $0.pointIsWithinDistanceOfBoundary(point: p, distance: d, accuracy: accuracy)
+            $0.pointIsWithinDistanceOfBoundary(point: p, distance: d)
         }
     }
 
@@ -139,7 +139,7 @@ internal func windingCountImpliesContainment(_ count: Int, using rule: PathFillR
     }
 
     @objc(initWithCGPath:) convenience public init(cgPath: CGPath) {
-        var context = PathApplierFunctionContext()
+        let context = PathApplierFunctionContext()
         func applierFunction(_ ctx: UnsafeMutableRawPointer?, _ element: UnsafePointer<CGPathElement>) {
             guard let context = ctx?.assumingMemoryBound(to: PathApplierFunctionContext.self).pointee else {
                 fatalError("unexpected applierFunction context")
@@ -181,10 +181,11 @@ internal func windingCountImpliesContainment(_ count: Int, using rule: PathFillR
                 fatalError("unexpected unknown path element type \(element.pointee.type)")
             }
         }
-        let rawContextPointer = UnsafeMutableRawPointer(&context).bindMemory(to: PathApplierFunctionContext.self, capacity: 1)
-        cgPath.apply(info: rawContextPointer, function: applierFunction)
+        withUnsafePointer(to: context) {
+            let rawPointer = UnsafeMutableRawPointer(mutating: $0)
+            cgPath.apply(info: rawPointer, function: applierFunction)
+        }
         context.completeComponentIfNeededAndClearPointsAndOrders()
-
         self.init(components: context.components)
     }
 
@@ -217,7 +218,7 @@ internal func windingCountImpliesContainment(_ count: Int, using rule: PathFillR
     // MARK: - vector boolean operations
 
     public func point(at location: IndexedPathLocation) -> CGPoint {
-        return self.elementAtComponentIndex(location.componentIndex, elementIndex: location.elementIndex).compute(location.t)
+        return self.elementAtComponentIndex(location.componentIndex, elementIndex: location.elementIndex).point(at: location.t)
     }
 
     internal func elementAtComponentIndex(_ componentIndex: Int, elementIndex: Int) -> BezierCurve {
@@ -255,22 +256,22 @@ internal func windingCountImpliesContainment(_ count: Int, using rule: PathFillR
     }
 
     @objc(offsetWithDistance:) public func offset(distance d: CGFloat) -> Path {
-        return Path(components: self.components.map {
+        return Path(components: self.components.compactMap {
             $0.offset(distance: d)
         })
     }
 
-    private func performBooleanOperation(_ operation: BooleanPathOperation, with other: Path, accuracy: CGFloat) -> Path? {
+    private func performBooleanOperation(_ operation: BooleanPathOperation, with other: Path, accuracy: CGFloat) -> Path {
         let intersections = self.intersections(with: other, accuracy: accuracy)
         let augmentedGraph = AugmentedGraph(path1: self, path2: other, intersections: intersections, operation: operation)
         return augmentedGraph.performOperation()
     }
 
-    @objc(subtractPath:accuracy:) public func subtract(_ other: Path, accuracy: CGFloat=BezierKit.defaultIntersectionAccuracy) -> Path? {
+    @objc(subtractPath:accuracy:) public func subtract(_ other: Path, accuracy: CGFloat=BezierKit.defaultIntersectionAccuracy) -> Path {
         return self.performBooleanOperation(.subtract, with: other.reversed(), accuracy: accuracy)
     }
 
-    @objc(unionPath:accuracy:) public func `union`(_ other: Path, accuracy: CGFloat=BezierKit.defaultIntersectionAccuracy) -> Path? {
+    @objc(unionPath:accuracy:) public func `union`(_ other: Path, accuracy: CGFloat=BezierKit.defaultIntersectionAccuracy) -> Path {
         guard self.isEmpty == false else {
             return other
         }
@@ -280,11 +281,11 @@ internal func windingCountImpliesContainment(_ count: Int, using rule: PathFillR
         return self.performBooleanOperation(.union, with: other, accuracy: accuracy)
     }
 
-    @objc(intersectPath:accuracy:) public func intersect(_ other: Path, accuracy: CGFloat=BezierKit.defaultIntersectionAccuracy) -> Path? {
+    @objc(intersectPath:accuracy:) public func intersect(_ other: Path, accuracy: CGFloat=BezierKit.defaultIntersectionAccuracy) -> Path {
         return self.performBooleanOperation(.intersect, with: other, accuracy: accuracy)
     }
 
-    @objc(crossingsRemovedWithAccuracy:) public func crossingsRemoved(accuracy: CGFloat=BezierKit.defaultIntersectionAccuracy) -> Path? {
+    @objc(crossingsRemovedWithAccuracy:) public func crossingsRemoved(accuracy: CGFloat=BezierKit.defaultIntersectionAccuracy) -> Path {
         let intersections = self.selfIntersections(accuracy: accuracy)
         let augmentedGraph = AugmentedGraph(path1: self, path2: self, intersections: intersections, operation: .removeCrossings)
         return augmentedGraph.performOperation()
@@ -343,6 +344,9 @@ public struct IndexedPathLocation: Equatable, Comparable {
         self.elementIndex = elementIndex
         self.t = t
     }
+    public init(componentIndex: Int, locationInComponent: IndexedPathComponentLocation) {
+        self.init(componentIndex: componentIndex, elementIndex: locationInComponent.elementIndex, t: locationInComponent.t)
+    }
     public static func < (lhs: IndexedPathLocation, rhs: IndexedPathLocation) -> Bool {
         if lhs.componentIndex < rhs.componentIndex {
             return true
@@ -356,6 +360,9 @@ public struct IndexedPathLocation: Equatable, Comparable {
         }
         return lhs.t < rhs.t
     }
+    public var locationInComponent: IndexedPathComponentLocation {
+        return IndexedPathComponentLocation(elementIndex: self.elementIndex, t: self.t)
+    }
 }
 
 public struct PathIntersection: Equatable {
@@ -365,12 +372,7 @@ public struct PathIntersection: Equatable {
         self.indexedPathLocation2 = indexedPathLocation2
     }
     fileprivate init(componentIntersection: PathComponentIntersection, componentIndex1: Int, componentIndex2: Int) {
-        self.indexedPathLocation1 = IndexedPathLocation(componentIndex: componentIndex1,
-                                                        elementIndex: componentIntersection.indexedComponentLocation1.elementIndex,
-                                                        t: componentIntersection.indexedComponentLocation1.t)
-        self.indexedPathLocation2 = IndexedPathLocation(componentIndex: componentIndex2,
-                                                        elementIndex: componentIntersection.indexedComponentLocation2.elementIndex,
-                                                        t: componentIntersection.indexedComponentLocation2.t)
-
+        self.indexedPathLocation1 = IndexedPathLocation(componentIndex: componentIndex1, locationInComponent: componentIntersection.indexedComponentLocation1)
+        self.indexedPathLocation2 = IndexedPathLocation(componentIndex: componentIndex2, locationInComponent: componentIntersection.indexedComponentLocation2)
     }
 }
